@@ -1,45 +1,154 @@
-# Perceptrail
+# Chain Package
 
-**Perceptrail** is a self-hosted next-generation photo gallery that allows users to interact with large photo libraries through dynamic and flexible navigation. Instead of traditional albums and directories, **Perceptrail** offers an endless journey through your photos, enabling you to view them from various perspectives, such as people, geolocations, objects, cameras, and other metadata powered by AI.
+The `chain` package provides a flexible implementation of the Chain of Responsibility pattern for processing data through a series of steps.
 
-The core concept is to provide an infinite way to explore content. By navigating through similar photos, users can see their collection from new angles, choosing different points of view through the plugin system we call **Perceptors**.
+## Overview
 
-**Perceptors** is a modular system built from scratch, allowing the integration of various plugins for analyzing, searching, and interacting with photos. These plugins can introduce new navigation criteria like filters by geotags, faces, objects, camera models, and more.
+This package implements a pipeline processing system where each step in the chain can:
+- Process data sequentially
+- Transform data between different types
+- Filter or skip items
+- Branch processing paths based on conditions
 
-## Key Features
+## Core Components
 
-- Infinite browsing of photos based on similarity or metadata.
-- Navigation by people, geolocations, objects, cameras, and other criteria.
-- Powerful **Perceptors** plugin system for extended navigation and analysis capabilities.
-- AI/ML integration for recognizing and analyzing content.
+### Interfaces
 
-## Tech Stack
+#### Processor
+Base interface for all chain elements. Represents a processing unit that can be chained together:
+```go
+type Processor interface {
+    // Process handles the main processing logic with context support
+    Process(context.Context)
+    // setErrorChannel configures error reporting channel
+    setErrorChannel(chan<- error)
+}
+```
 
-- **Frontend**: Built with [Svelte](https://svelte.dev/), using **IndexDB** for local storage and fast interactions.
-- **Backend**: Developed with [Go](https://go.dev/), using **PostgreSQL** for data storage.
-- **ML Backend**: (in development) Likely to be implemented in Go or Python with a custom data structure for storing machine learning results.
+#### Decorator
+Transforms input data to output data. Used for single-responsibility processors that modify or enrich data:
+```go
+type Decorator[Ti any, To any] interface {
+    // Decorate transforms input type Ti to output type To
+    Decorate(Ti) (To, error)
+    // Stop handles cleanup when processing is done
+    Stop()
+}
+```
 
-## Capabilities
+#### EntryPoint
+Starts the chain and provides initial data. Used as the first element in processing chains:
+```go
+type EntryPoint[Ti any, To any] interface {
+    // Start initiates data feeding into the chain
+    Start(chan<- Ti, context.Context)
+    // Decorate transforms initial data if needed
+    Decorate(Ti) (To, error)
+    // Stop handles cleanup
+    Stop()
+}
+```
 
-- Interactive display and editing of metadata for each item.
-- Filtering based on various criteria depending on installed **Perceptors**.
-- Support for batch operations for bulk metadata editing.
+#### Switcher
+Branches processing paths based on input. Used when data needs to be routed to different processors:
+```go
+type Switcher[Ti any, To any] interface {
+    // Switch decides which output channels should receive the data
+    // Returns map[channelIndex]data
+    Switch(Ti) (map[int]To, error)
+    // Stop handles cleanup
+    Stop()
+}
+```
 
-## Documentation
+### Implementation Types
 
-- [Roadmap](_sb/docs/roadmap.md) and [findings & decisions](_sb/docs/findings.md)
-- [Design diagrams](_sb/puml) (PlantUML; rendered in [_sb/diagrams](_sb/diagrams))
-- Modules: [gontroller](gontroller/readme.md) · [perceplib](perceplib/README.md) ·
-  [perceptors](perceptors/readme.md) · [svebapp](svebapp/README.md)
+#### ChainProcessor
+Main implementation that manages sequential processing:
+- Holds a sequence of processors
+- Manages error propagation
+- Handles context cancellation
+- Ensures proper cleanup
 
-## Big Flow
+#### DecoratorRunner
+Generic implementation of the Decorator pattern:
+- Handles channel communication
+- Manages goroutines
+- Provides error handling
+- Ensures thread safety
 
-![Alt text](./_sb/diagrams/Item%20Flow.svg)
+#### EntryRunner
+Implementation for chain entry points:
+- Manages data ingestion
+- Handles initial transformations
+- Controls processing flow
+- Provides cleanup mechanisms
 
-## Items watching and validating process
+#### SwitchRunner
+Implementation for branching logic:
+- Manages multiple output channels
+- Routes data based on conditions
+- Handles fan-out patterns
+- Ensures proper channel management
 
-![Alt text](./_sb/diagrams/Walker%20and%20validating.svg)
+## Usage Patterns
 
-## ML Flow
+### Sequential Processing
+```go
+// Create a chain of processors that execute in order
+chain := NewChainProcessor(errch)
+chain.AddStep(validateData)
+chain.AddStep(enrichData)
+chain.AddStep(saveData)
+```
 
-![Alt text](./_sb/diagrams/ML%20Flow.svg)
+### Transformation Pipeline
+```go
+// Create a pipeline that transforms data through multiple steps
+decorator1 := NewDecorator(rawCh, parsedCh, parseStep)
+decorator2 := NewDecorator(parsedCh, enrichedCh, enrichStep)
+decorator3 := NewDecorator(enrichedCh, finalCh, finalizeStep)
+```
+
+### Branching Flow
+```go
+// Create a processor that routes data to different paths
+switcher := NewSwitch(input, []chan<- Output{
+    successPath,
+    retryPath,
+    errorPath,
+}, routingLogic)
+```
+
+## Best Practices
+
+1. Channel Management
+   - Use buffered channels for errors
+   - Close channels properly
+   - Handle channel cleanup
+
+2. Context Usage
+   - Always pass context for cancellation
+   - Implement proper cleanup on cancel
+   - Use timeouts when appropriate
+
+3. Error Handling
+   - Use error channels for async errors
+   - Handle all error cases
+   - Provide meaningful error messages
+
+4. Thread Safety
+   - Ensure thread-safe state modifications
+   - Use proper synchronization
+   - Avoid race conditions
+
+## Examples
+
+See the `perceptors` directory for real-world examples:
+- `exif_date` - EXIF date extraction using Decorator pattern
+- `exif_geo` - Geolocation processing with data transformation
+- `exif_size` - Image size processing showing chain usage
+- `ml_color` - Color analysis demonstrating complex processing
+```
+
+
