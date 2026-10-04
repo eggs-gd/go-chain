@@ -1,154 +1,70 @@
-# Chain Package
+# chain
 
-The `chain` package provides a flexible implementation of the Chain of Responsibility pattern for processing data through a series of steps.
+Steps that run concurrently, connected by channels. A step's logic is plain Go (a
+`EntryPoint`, a `Decorator`, a `Switcher`, a `Consumer`); the package runs it: a goroutine
+per step, reading one channel and writing another.
 
-## Overview
-
-This package implements a pipeline processing system where each step in the chain can:
-- Process data sequentially
-- Transform data between different types
-- Filter or skip items
-- Branch processing paths based on conditions
-
-## Core Components
-
-### Interfaces
-
-#### Processor
-Base interface for all chain elements. Represents a processing unit that can be chained together:
 ```go
-type Processor interface {
-    // Process handles the main processing logic with context support
-    Process(context.Context)
-    // setErrorChannel configures error reporting channel
-    setErrorChannel(chan<- error)
-}
+in, parsed, out := make(chan Raw), make(chan Parsed), make(chan Item, 100)
+
+c := chain.NewChainProcessor(errch)                           // errors of every step (skips never get here)
+c.AddStep(chain.NewEntryPoint(in, walker))              // the one input: its values, then it is done
+c.AddStep(chain.NewDecoratorN(in, parsed, parse, 4)) // the same Decorator on 4 workers
+c.AddStep(chain.NewDecorator(parsed, out, enrich))
+c.AddStep(chain.NewEnd(out, publish))              // the end: every value consumed
+c.Process(ctx)                                  // one pass: returns when every step has
 ```
 
-#### Decorator
-Transforms input data to output data. Used for single-responsibility processors that modify or enrich data:
-```go
-type Decorator[Ti any, To any] interface {
-    // Decorate transforms input type Ti to output type To
-    Decorate(Ti) (To, error)
-    // Stop handles cleanup when processing is done
-    Stop()
-}
-```
+## A pass
 
-#### EntryPoint
-Starts the chain and provides initial data. Used as the first element in processing chains:
-```go
-type EntryPoint[Ti any, To any] interface {
-    // Start initiates data feeding into the chain
-    Start(chan<- Ti, context.Context)
-    // Decorate transforms initial data if needed
-    Decorate(Ti) (To, error)
-    // Stop handles cleanup
-    Stop()
-}
-```
+A chain has **one input, its entry point** (an output only). A pass is `Process`: the
+entry emits its values and returns, and its output closes. A step reads its input
+until it closes, gives what it holds (a `Flusher`: `Flush() ([]To, error)` — a group
+not complete yet) and returns. **An output closes once every step that writes to it
+has returned**: the chain keeps a `sync.WaitGroup` per output, one count per writer —
+where branches join (several steps writing one channel), the joint closes after the
+last of them. `Process` returns when every step has, so every value of the pass went
+through every step by then. Channels close once: the next pass is a new chain, with
+new channels.
 
-#### Switcher
-Branches processing paths based on input. Used when data needs to be routed to different processors:
-```go
-type Switcher[Ti any, To any] interface {
-    // Switch decides which output channels should receive the data
-    // Returns map[channelIndex]data
-    Switch(Ti) (map[int]To, error)
-    // Stop handles cleanup
-    Stop()
-}
-```
+- **A switch** sends a value to one output; its outputs close when it returns.
+- **An `N` step** (n workers) returns after its last worker: every value done.
+- **A sub-chain** closes its own outputs; a channel is written by steps of one chain.
 
-### Implementation Types
+## Steps
 
-#### ChainProcessor
-Main implementation that manages sequential processing:
-- Holds a sequence of processors
-- Manages error propagation
-- Handles context cancellation
-- Ensures proper cleanup
+| Constructor | Logic | What it does |
+|---|---|---|
+| `NewEntryPoint(out, e)` | `EntryPoint[T]`: `Start(ctx, emit) error` | the chain's one input |
+| `NewDecorator(in, out, d)` | `Decorator[Ti, To]`: `Decorate(Ti) (To, error)` | one value in, one out |
+| `NewSwitch(in, outs, s)` | `Switcher[T]`: `Switch(T) (int, error)` | a value to one output (its index) |
+| `NewSwitchDecorator(in, outs, s)` | `SwitchDecorator[Ti, To]`: `Switch(Ti) (int, To, error)` | a value, turned into another, to one output |
+| `NewEnd(in, c)` | `Consumer[T]`: `Consume(T) error` | a chain's end: every value consumed |
 
-#### DecoratorRunner
-Generic implementation of the Decorator pattern:
-- Handles channel communication
-- Manages goroutines
-- Provides error handling
-- Ensures thread safety
+**`…N`** (`NewDecoratorN`, `NewSwitchN`, `NewSwitchDecoratorN`; `n` last, as in
+`strings.SplitN`): the same on n workers — the logic safe for concurrent use, the
+order may change. Every step but the entry point is one runner inside: values from
+the input, each through the logic, to the output it picks.
+| `NewChainProcessor(errch)` + `AddStep` | — | a chain; it is a step too (a sub-chain); `Process` is a pass |
 
-#### EntryRunner
-Implementation for chain entry points:
-- Manages data ingestion
-- Handles initial transformations
-- Controls processing flow
-- Provides cleanup mechanisms
+Optional on any logic:
 
-#### SwitchRunner
-Implementation for branching logic:
-- Manages multiple output channels
-- Routes data based on conditions
-- Handles fan-out patterns
-- Ensures proper channel management
+- **`Stopper`** (`Stop()`): called once, when the step ends.
+- **`Flusher[To]`**: what the step holds goes out when its input ends.
 
-## Usage Patterns
+## Errors
 
-### Sequential Processing
-```go
-// Create a chain of processors that execute in order
-chain := NewChainProcessor(errch)
-chain.AddStep(validateData)
-chain.AddStep(enrichData)
-chain.AddStep(saveData)
-```
+- **A step's error** goes to the chain's error channel.
+- **`ErrSkippedItem`** (a value dropped on purpose: buffered, unchanged, not wanted)
+  is **not an error**: it is dropped and never reaches the channel.
+- **A sub-chain** made with `New(nil)` uses the error channel of the chain it runs in.
+- **Every send** (to a channel or to the error channel) gives up when the context
+  ends, so a stopped chain never blocks; a step stopped by the context does not
+  flush.
 
-### Transformation Pipeline
-```go
-// Create a pipeline that transforms data through multiple steps
-decorator1 := NewDecorator(rawCh, parsedCh, parseStep)
-decorator2 := NewDecorator(parsedCh, enrichedCh, enrichStep)
-decorator3 := NewDecorator(enrichedCh, finalCh, finalizeStep)
-```
+## Tests
 
-### Branching Flow
-```go
-// Create a processor that routes data to different paths
-switcher := NewSwitch(input, []chan<- Output{
-    successPath,
-    retryPath,
-    errorPath,
-}, routingLogic)
-```
-
-## Best Practices
-
-1. Channel Management
-   - Use buffered channels for errors
-   - Close channels properly
-   - Handle channel cleanup
-
-2. Context Usage
-   - Always pass context for cancellation
-   - Implement proper cleanup on cancel
-   - Use timeouts when appropriate
-
-3. Error Handling
-   - Use error channels for async errors
-   - Handle all error cases
-   - Provide meaningful error messages
-
-4. Thread Safety
-   - Ensure thread-safe state modifications
-   - Use proper synchronization
-   - Avoid race conditions
-
-## Examples
-
-See the `perceptors` directory for real-world examples:
-- `exif_date` - EXIF date extraction using Decorator pattern
-- `exif_geo` - Geolocation processing with data transformation
-- `exif_size` - Image size processing showing chain usage
-- `ml_color` - Color analysis demonstrating complex processing
-```
-
-
+`chain_test.go`, run with `-race`: a pass, a `Flusher`'s values before its output
+closes, a switch and a join that closes after its slow branch, an `N` decorator finishes its
+values, a switch decorator on n workers, errors and skips, a sub-chain inherits the error channel, cancel unblocks a
+blocked send and `Stop` is called once.

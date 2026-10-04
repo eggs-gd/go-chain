@@ -1,63 +1,34 @@
 package chain
 
-import (
-	"context"
-)
-
-type Switcher[Ti any, To any] interface {
-	worker
-	// Switch takes Ti and then makes decision where it should be placed
-	// mapping evaluates by order channels in parent struct and results
-	// arr := Switch(in Ti)
-	// &Splitter.chout[0] <- arr[0]
-	// &Splitter.chout[n] <- arr[n]
-	Switch(Ti) (map[int]To, error)
-	Stop()
-}
-type switchRunner[Ti any, To any] struct {
-	cherr     chan<- error
-	chin      <-chan Ti
-	chout     []chan<- To
-	processor Switcher[Ti, To]
+// Switcher: a step's logic that picks one output for a value (its index). Optional:
+// Stopper.
+type Switcher[T any] interface {
+	Switch(T) (int, error)
 }
 
-func (s *switchRunner[Ti, To]) setErrorChannel(cherr chan<- error) {
-	s.cherr = cherr
+// SwitchDecorator: a switch's logic that also turns the value into another (the
+// output's index and the new value). Optional: Stopper.
+type SwitchDecorator[Ti, To any] interface {
+	Switch(Ti) (int, To, error)
 }
 
-func (s *switchRunner[Ti, To]) Process(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for {
-		select {
-		case <-ctx.Done():
-			s.processor.Stop()
-			return
-
-		case input, ok := <-s.chin:
-			if !ok {
-				s.processor.Stop()
-				return
-			}
-			res, err := s.processor.Switch(input)
-			if err != nil {
-				s.cherr <- err
-			} else {
-				for i, o := range res {
-					if i < len(s.chout) {
-						s.chout[i] <- o
-					}
-				}
-			}
-		}
-	}
+// NewSwitch: a value to one output; when the input ends, every output is done
+func NewSwitch[T any](in <-chan T, outs []chan<- T, logic Switcher[T]) Processor {
+	return NewSwitchN(in, outs, logic, 1)
 }
 
-func NewSwitch[Ti any, To any](chin <-chan Ti, chout []chan<- To, processor Switcher[Ti, To]) Processor {
-	return &switchRunner[Ti, To]{
-		chin:      chin,
-		chout:     chout,
-		processor: processor,
-	}
+// NewSwitchN: the same on n workers (the order may change)
+func NewSwitchN[T any](in <-chan T, outs []chan<- T, logic Switcher[T], n int) Processor {
+	return &runner[T, T]{n: n, in: in, outs: outs, logic: logic,
+		each: func(v T) (int, T, error) { i, err := logic.Switch(v); return i, v, err }}
+}
+
+// NewSwitchDecorator: a value, turned into another, to one output
+func NewSwitchDecorator[Ti, To any](in <-chan Ti, outs []chan<- To, logic SwitchDecorator[Ti, To]) Processor {
+	return NewSwitchDecoratorN(in, outs, logic, 1)
+}
+
+// NewSwitchDecoratorN: the same on n workers (the order may change)
+func NewSwitchDecoratorN[Ti, To any](in <-chan Ti, outs []chan<- To, logic SwitchDecorator[Ti, To], n int) Processor {
+	return &runner[Ti, To]{n: n, in: in, outs: outs, logic: logic, each: logic.Switch}
 }

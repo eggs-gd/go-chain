@@ -1,54 +1,19 @@
 package chain
 
-import (
-	"context"
-)
-
-type Decorator[Ti any, To any] interface {
-	worker
+// Decorator: a step's logic — one value in, one out (or an error). Optional: Stopper,
+// Flusher.
+type Decorator[Ti, To any] interface {
 	Decorate(Ti) (To, error)
 }
 
-type decoratorRunner[Ti any, To any] struct {
-	cherr     chan<- error
-	chin      <-chan Ti
-	chout     chan<- To
-	processor Decorator[Ti, To]
+// NewDecorator: every value of in through the logic, to out
+func NewDecorator[Ti, To any](in <-chan Ti, out chan<- To, logic Decorator[Ti, To]) Processor {
+	return NewDecoratorN(in, out, logic, 1)
 }
 
-func (d *decoratorRunner[Ti, To]) setErrorChannel(cherr chan<- error) {
-	d.cherr = cherr
-}
-
-func (d *decoratorRunner[Ti, To]) Process(parentCtx context.Context) {
-	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
-
-	for {
-		select {
-		case <-ctx.Done():
-			d.processor.Stop()
-			return
-
-		case input, ok := <-d.chin:
-			if !ok {
-				d.processor.Stop()
-				return
-			}
-			res, err := d.processor.Decorate(input)
-			if err != nil {
-				d.cherr <- err
-			} else {
-				d.chout <- res
-			}
-		}
-	}
-}
-
-func NewDecorator[Ti any, To any](chin <-chan Ti, chout chan<- To, processor Decorator[Ti, To]) Processor {
-	return &decoratorRunner[Ti, To]{
-		chin:      chin,
-		chout:     chout,
-		processor: processor,
-	}
+// NewDecoratorN: the same on n workers (the logic safe for concurrent use; the order
+// may change)
+func NewDecoratorN[Ti, To any](in <-chan Ti, out chan<- To, logic Decorator[Ti, To], n int) Processor {
+	return &runner[Ti, To]{n: n, in: in, outs: []chan<- To{out}, logic: logic,
+		each: func(v Ti) (int, To, error) { o, err := logic.Decorate(v); return 0, o, err }}
 }

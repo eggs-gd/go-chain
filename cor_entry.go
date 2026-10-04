@@ -1,58 +1,26 @@
 package chain
 
-import (
-	"context"
-)
+import "context"
 
-type EntryPoint[Ti any, To any] interface {
-	worker
-	Start(chan<- Ti, context.Context)
-	Decorate(Ti) (To, error)
+// EntryPoint: the logic of a chain's entry — one pass: every value it finds, emitted
+// (emit is false once the chain stops). Optional: Stopper.
+type EntryPoint[T any] interface {
+	Start(ctx context.Context, emit func(T) bool) error
 }
 
-type entryRunner[Ti any, To any] struct {
-	cherr     chan<- error
-	chin      chan Ti
-	chout     chan<- To
-	processor EntryPoint[Ti, To]
+type entryRunner[T any] struct {
+	out   chan<- T
+	logic EntryPoint[T]
 }
 
-func (d *entryRunner[Ti, To]) setErrorChannel(cherr chan<- error) {
-	d.cherr = cherr
+// NewEntryPoint: the chain's one input, an output only; when it is done, its output closes
+func NewEntryPoint[T any](out chan<- T, logic EntryPoint[T]) Processor {
+	return &entryRunner[T]{out, logic}
 }
 
-func (d *entryRunner[Ti, To]) Process(parentCtx context.Context) {
-	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+func (e *entryRunner[T]) outputs() []output { return []output{outputOf(e.out)} }
 
-	go d.processor.Start(d.chin, ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			d.processor.Stop()
-			return
-
-		case input, ok := <-d.chin:
-			if !ok {
-				d.processor.Stop()
-				return
-			}
-			res, err := d.processor.Decorate(input)
-			if err != nil {
-				d.cherr <- err
-			} else {
-				d.chout <- res
-			}
-		}
-	}
-}
-
-func NewEntryPoint[Ti any, To any](chout chan<- To, processor EntryPoint[Ti, To]) Processor {
-
-	return &entryRunner[Ti, To]{
-		chin:      make(chan Ti),
-		chout:     chout,
-		processor: processor,
-	}
+func (e *entryRunner[T]) run(r runtime) {
+	defer stop(e.logic)
+	r.report(e.logic.Start(r.ctx, func(v T) bool { return send(r.ctx, e.out, v) }))
 }
