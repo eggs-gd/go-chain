@@ -1,6 +1,7 @@
 package chain
 
-// Switcher: a step's logic that picks one output for a value (its index). Optional:
+// Switcher: a step's logic that picks one output for a value (its index; negative:
+// none, the value dropped on purpose; past the outputs: an error). Optional:
 // Stopper.
 type Switcher[T any] interface {
 	Switch(T) (int, error)

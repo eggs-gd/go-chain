@@ -10,6 +10,7 @@ package chain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -75,15 +76,38 @@ func (c *chain) Process(ctx context.Context) {
 
 func (c *chain) outputs() []output { return nil }
 
-func (c *chain) run(r runtime) {
+// step: a step that runs, with the runtime of the chain it belongs to (its error
+// channel)
+type step struct {
+	p Processor
+	r runtime
+}
+
+// flat: the chain's steps with every sub-chain unfolded into its own steps — so the
+// writers of a channel are counted across every level: a join written by steps
+// of two sub-chains closes after the last of them, not when one sub-chain is done
+func (c *chain) flat(r runtime) []step {
 	if c.errch != nil {
 		r.errch = c.errch
 	}
+	var steps []step
+	for _, s := range c.steps {
+		if sub, ok := s.(*chain); ok {
+			steps = append(steps, sub.flat(r)...)
+		} else {
+			steps = append(steps, step{s, r})
+		}
+	}
+	return steps
+}
+
+func (c *chain) run(r runtime) {
+	steps := c.flat(r)
 	// Every output closes once all its writers have returned
 	writers := map[any]*sync.WaitGroup{}
 	var outputs []output
-	for _, s := range c.steps {
-		for _, o := range s.outputs() {
+	for _, s := range steps {
+		for _, o := range s.p.outputs() {
 			if writers[o.ch] == nil {
 				writers[o.ch] = &sync.WaitGroup{}
 				outputs = append(outputs, o)
@@ -95,14 +119,14 @@ func (c *chain) run(r runtime) {
 	for _, o := range outputs {
 		all.Go(func() { writers[o.ch].Wait(); o.close() })
 	}
-	for _, s := range c.steps {
+	for _, s := range steps {
 		all.Go(func() {
 			defer func() {
-				for _, o := range s.outputs() {
+				for _, o := range s.p.outputs() {
 					writers[o.ch].Done()
 				}
 			}()
-			s.run(r)
+			s.p.run(s.r)
 		})
 	}
 	all.Wait()
@@ -125,7 +149,8 @@ func stop(logic any) {
 }
 
 // runner: what every step but the entry point runs — values from in, each through
-// the logic (each: the output's index and the value; -1: none), on n workers; when
+// the logic (each: the output's index and the value; negative: none — dropped on
+// purpose; past the outputs: an error), on n workers; when
 // the input ends, after the last worker, what a single-output logic holds (Flusher)
 type runner[Ti, To any] struct {
 	n     int
@@ -149,9 +174,12 @@ func (s *runner[Ti, To]) run(r runtime) {
 	for range max(s.n, 1) {
 		workers.Go(func() {
 			receive(r.ctx, s.in, func(v Ti) {
-				if i, o, err := s.each(v); err != nil {
+				switch i, o, err := s.each(v); {
+				case err != nil:
 					r.report(err)
-				} else if i >= 0 && i < len(s.outs) {
+				case i >= len(s.outs):
+					r.report(fmt.Errorf("chain: output %d of %d", i, len(s.outs)))
+				case i >= 0:
 					send(r.ctx, s.outs[i], o)
 				}
 			})

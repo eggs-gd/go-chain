@@ -77,7 +77,8 @@ Channels close once: the next pass is a new chain with new channels.
 ```
 
 - **A switch** sends each value to one of its outputs; when its input ends, all its
-  outputs close.
+  outputs close. A negative index drops the value on purpose; an index past the
+  outputs is an error, not a value lost silently.
 - **A join** is a channel several steps write to: it closes after the last of them
   returned, however long a branch takes.
 
@@ -90,10 +91,12 @@ its last worker: its output closes only when every value is done.
 
 ## Sub-chains
 
-A chain is a step too: `AddStep(subchain)`. It closes its own outputs. Made with
-`NewChainProcessor(nil)`, it reports its errors to the chain it runs in — a stage of
-a bigger pipeline declares its own steps in its own constructor, and the top stays a
-list of stages.
+A chain is a step too: `AddStep(subchain)`. When it runs inside another chain, its
+steps join the outer chain's: the writers of every channel are counted across all
+levels, so a channel written by steps of two sub-chains closes after the last of
+them. Made with `NewChainProcessor(nil)`, a sub-chain reports its errors to the
+chain it runs in — a stage of a bigger pipeline declares its own steps in its own
+constructor, and the top stays a list of stages.
 
 ## Errors and skips
 
@@ -112,9 +115,10 @@ the entry point should return. A step stopped by the context does not flush.
 ## Tests
 
 `go test -race ./...`: a pass, a flusher's values before its output closes, a switch
-and a join that closes after its slow branch, workers that finish every value, errors
-and skips, a sub-chain inheriting the error channel, cancel unblocking a send, `Stop`
-called once; the example.
+and a join that closes after its slow branch, a join across two sub-chains, a switch
+index out of range, workers that finish every value, errors and skips, a sub-chain
+inheriting the error channel, cancel unblocking a send, `Stop` called once; the
+example.
 
 ## License
 

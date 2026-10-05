@@ -206,3 +206,50 @@ func TestSwitchDecoratorN(t *testing.T) {
 		t.Errorf("even %v, odd %v", evens.got, odds.got)
 	}
 }
+
+// A join written by steps of two sub-chains closes after the slower of them: the
+// writers of a channel are counted across every level of the chain
+func TestJoinAcrossSubChains(t *testing.T) {
+	in, even, odd, joined := make(chan int), make(chan int), make(chan int), make(chan int)
+	slow := fn[int, int](func(v int) (int, error) { time.Sleep(10 * time.Millisecond); return v, nil })
+	evens, odds := NewChainProcessor(nil), NewChainProcessor(nil)
+	evens.AddStep(NewDecorator(even, joined, slow))
+	odds.AddStep(NewDecorator(odd, joined, same))
+	got := &collect[int]{}
+	c := NewChainProcessor(nil)
+	c.AddStep(NewEntryPoint(in, values{1, 2, 3, 4, 5, 6}))
+	c.AddStep(NewSwitch(in, []chan<- int{even, odd}, parity{}))
+	c.AddStep(evens)
+	c.AddStep(odds)
+	c.AddStep(NewEnd(joined, got))
+	pass(t, c)
+	if slices.Sort(got.got); !slices.Equal(got.got, []int{1, 2, 3, 4, 5, 6}) {
+		t.Errorf("got %v", got.got)
+	}
+}
+
+// out: a switch that sends to an output it does not have
+type out int
+
+func (o out) Switch(int) (int, error) { return int(o), nil }
+
+// A switch picking an output it does not have is an error, not a value lost
+// silently; a negative index drops the value on purpose
+func TestSwitchOutOfRange(t *testing.T) {
+	for _, tc := range []struct {
+		index  out
+		errors int
+	}{{2, 2}, {-1, 0}} {
+		in, a, b := make(chan int), make(chan int), make(chan int)
+		errs := make(chan error, 8)
+		c := NewChainProcessor(errs)
+		c.AddStep(NewEntryPoint(in, values{1, 2}))
+		c.AddStep(NewSwitch(in, []chan<- int{a, b}, tc.index))
+		c.AddStep(NewEnd(a, &collect[int]{}))
+		c.AddStep(NewEnd(b, &collect[int]{}))
+		pass(t, c)
+		if len(errs) != tc.errors {
+			t.Errorf("index %d: %d errors, want %d", tc.index, len(errs), tc.errors)
+		}
+	}
+}
