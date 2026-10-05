@@ -1,9 +1,10 @@
-// Package chain: steps that run concurrently, connected by channels. A chain has
-// one input, its entry point; a pass (Process) runs every step until its input closes:
-// the entry closes its output when it is done, a step that read its input to the
-// end gives what it holds (Flusher) and returns, and an output closes once every
-// step that writes to it has returned (a WaitGroup per output: where branches join,
-// the joint closes after the last of them). Process returns when every step has.
+// Package chain: a Chain of Responsibility on channels — steps that run
+// concurrently, connected by typed channels. A chain has one input, its entry
+// point; a pass (Process) runs every step until its input closes: the entry closes
+// its output when it is done, a step that read its input to the end gives what it
+// holds (Flusher) and returns, and an output closes once every step that writes to
+// it has returned (a WaitGroup per output: where branches join, the joint closes
+// after the last of them). Process returns when every step has.
 package chain
 
 import (
